@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import pytz
 from datetime import datetime, date, time
@@ -58,7 +59,11 @@ SAVINGS_KEYWORDS = ["saved", "saving", "savings", "deposited", "invest", "put as
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 def get_spreadsheet():
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+    raw_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if raw_json:
+        creds = Credentials.from_service_account_info(json.loads(raw_json), scopes=SCOPES)
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID)
 
