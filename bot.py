@@ -163,7 +163,10 @@ def log_entry(amount: float, note: str, entry_type: str, category: str):
         note.capitalize(),
     ], value_input_option="USER_ENTERED")
 
-    refresh_dashboard(spreadsheet, month_name)
+    try:
+        refresh_dashboard(spreadsheet, month_name)
+    except Exception as e:
+        logger.warning("Dashboard refresh failed (entry was saved): %s", e)
     return month_name
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -351,8 +354,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         month_name = log_entry(amount, note, entry_type, category)
     except Exception as e:
-        logger.error("Error: %s", e)
-        await update.message.reply_text("⚠️ Something went wrong writing to the sheet.")
+        logger.error("Error logging entry: %s", e)
+        await update.message.reply_text(
+            f"⚠️ Something went wrong writing to the sheet.\n\n`{type(e).__name__}: {e}`",
+            parse_mode="Markdown",
+        )
         return
 
     # Confirm log
