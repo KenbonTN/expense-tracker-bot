@@ -9,10 +9,10 @@ from collections import defaultdict
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, CommandHandler,
-    filters, ContextTypes, JobQueue
+    CallbackQueryHandler, filters, ContextTypes, JobQueue
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -339,12 +339,54 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
 # ── Telegram handlers ─────────────────────────────────────────────────────────
 KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("/summary"), KeyboardButton("/today")],
-     [KeyboardButton("/top5"),    KeyboardButton("/help")]],
+     [KeyboardButton("/top5"),    KeyboardButton("/help")],
+     [KeyboardButton("/edit"),    KeyboardButton("/delete")]],
     resize_keyboard=True,
 )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+
+    # ── Pending edit ──────────────────────────────────────────────────────────
+    if context.user_data.get("pending_edit"):
+        pending = context.user_data.pop("pending_edit")
+        result = parse_message(text)
+        if result is None:
+            await update.message.reply_text(
+                "❓ Couldn't parse that. Try: `200 lunch`\nSend /edit to start over.",
+                parse_mode="Markdown",
+                reply_markup=KEYBOARD,
+            )
+            return
+        amount, note, entry_type, category = result
+        try:
+            spreadsheet = get_spreadsheet()
+            sheet = spreadsheet.worksheet(pending["month_name"])
+            row_num = pending["row_num"]
+            sheet.update(
+                f"C{row_num}:F{row_num}",
+                [[entry_type.capitalize(), amount, category.capitalize(), note.capitalize()]],
+                value_input_option="USER_ENTERED",
+            )
+            try:
+                refresh_dashboard(spreadsheet, pending["month_name"])
+            except Exception as e:
+                logger.warning("Dashboard refresh failed: %s", e)
+            emoji = "💵" if entry_type == "income" else ("💰" if entry_type == "savings" else "✅")
+            await update.message.reply_text(
+                f"{emoji} *Updated:* {amount:,.0f} ETB — _{note.capitalize()}_\n"
+                f"📄 _{pending['month_name']}_ · Dashboard updated",
+                parse_mode="Markdown",
+                reply_markup=KEYBOARD,
+            )
+        except Exception as e:
+            logger.error("Edit error: %s", e)
+            await update.message.reply_text(
+                f"⚠️ Failed to update entry.\n\n`{type(e).__name__}: {e}`",
+                parse_mode="Markdown",
+            )
+        return
+
     result = parse_message(text)
     if result is None:
         await update.message.reply_text(
@@ -397,6 +439,96 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{emoji_t} *Spending alert!*\n{msg}\n\n"
                 f"💸 Total today: *{new_total:,.0f} ETB*",
                 parse_mode="Markdown",
+            )
+
+# ── Delete / Edit ─────────────────────────────────────────────────────────────
+def _entry_label(row: dict) -> str:
+    t = str(row.get("Type", "")).lower()
+    icon = "💵" if t == "income" else ("💰" if t == "savings" else "💸")
+    d = str(row.get("Date", ""))[-5:]
+    amt = row.get("Amount (ETB)", "")
+    note = str(row.get("Note", "—")).capitalize()[:22]
+    return f"{icon} {d} · {amt} ETB · {note}"
+
+def _entry_keyboard(rows: list, month_name: str, action: str) -> InlineKeyboardMarkup:
+    recent = rows[-10:]
+    offset = len(rows) - len(recent)
+    keyboard = [
+        [InlineKeyboardButton(_entry_label(row), callback_data=f"{action}|{month_name}|{offset + i + 2}")]
+        for i, row in enumerate(recent)
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    month_name = datetime.now(TIMEZONE).strftime("%B %Y")
+    rows = get_monthly_data(month_name)
+    if not rows:
+        await update.message.reply_text(f"No entries for {month_name}.")
+        return
+    await update.message.reply_text(
+        "🗑 *Select entry to delete:*",
+        parse_mode="Markdown",
+        reply_markup=_entry_keyboard(rows, month_name, "d"),
+    )
+
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    month_name = datetime.now(TIMEZONE).strftime("%B %Y")
+    rows = get_monthly_data(month_name)
+    if not rows:
+        await update.message.reply_text(f"No entries for {month_name}.")
+        return
+    await update.message.reply_text(
+        "✏️ *Select entry to edit:*",
+        parse_mode="Markdown",
+        reply_markup=_entry_keyboard(rows, month_name, "e"),
+    )
+
+async def handle_inline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel":
+        context.user_data.pop("pending_edit", None)
+        await query.edit_message_text("Cancelled.")
+        return
+
+    action, month_name, row_num_str = query.data.split("|", 2)
+    row_num = int(row_num_str)
+
+    if action == "d":
+        try:
+            spreadsheet = get_spreadsheet()
+            sheet = spreadsheet.worksheet(month_name)
+            row_vals = sheet.row_values(row_num)
+            sheet.delete_rows(row_num)
+            try:
+                refresh_dashboard(spreadsheet, month_name)
+            except Exception as e:
+                logger.warning("Dashboard refresh failed: %s", e)
+            label = " · ".join(v for v in row_vals if v)
+            await query.edit_message_text(f"🗑 Deleted: _{label}_\nDashboard updated.", parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Delete error: %s", e)
+            await query.edit_message_text(
+                f"⚠️ Failed to delete.\n\n`{type(e).__name__}: {e}`", parse_mode="Markdown"
+            )
+
+    elif action == "e":
+        try:
+            spreadsheet = get_spreadsheet()
+            sheet = spreadsheet.worksheet(month_name)
+            row_vals = sheet.row_values(row_num)
+            label = " · ".join(v for v in row_vals if v)
+            context.user_data["pending_edit"] = {"month_name": month_name, "row_num": row_num}
+            await query.edit_message_text(
+                f"✏️ Editing: _{label}_\n\nSend the corrected entry:\n`200 lunch`  or  `income 8000 salary`",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error("Edit select error: %s", e)
+            await query.edit_message_text(
+                f"⚠️ Failed.\n\n`{type(e).__name__}: {e}`", parse_mode="Markdown"
             )
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -489,6 +621,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/summary* — monthly overview\n"
         "*/today*   — today's spending\n"
         "*/top5*    — biggest expenses\n"
+        "*/edit*    — edit a recent entry\n"
+        "*/delete*  — delete a recent entry\n"
         "*/help*    — this message\n\n"
         "🔔 *Alerts* fire when you cross 250, 500, 700, or 1,000 ETB in a day.\n"
         "📩 *Daily report* sent every night at 9 PM.",
@@ -531,6 +665,9 @@ def main():
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("today",   cmd_today))
     app.add_handler(CommandHandler("top5",    cmd_top5))
+    app.add_handler(CommandHandler("delete",  cmd_delete))
+    app.add_handler(CommandHandler("edit",    cmd_edit))
+    app.add_handler(CallbackQueryHandler(handle_inline_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot is running…")
