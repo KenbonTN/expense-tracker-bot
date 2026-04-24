@@ -62,7 +62,8 @@ SAVINGS_KEYWORDS = ["saved", "saving", "savings", "deposited", "invest", "put as
 def get_spreadsheet():
     raw_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if raw_json:
-        decoded = base64.b64decode(raw_json).decode("utf-8")
+        padded = raw_json + "=" * (-len(raw_json) % 4)
+        decoded = base64.b64decode(padded).decode("utf-8")
         creds = Credentials.from_service_account_info(json.loads(decoded), scopes=SCOPES)
     else:
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
