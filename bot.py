@@ -18,7 +18,9 @@ from google.oauth2.service_account import Credentials
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 SPREADSHEET_ID   = os.environ["SPREADSHEET_ID"]
-CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+_BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+_creds_path      = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+CREDENTIALS_FILE = _creds_path if os.path.isabs(_creds_path) else os.path.join(_BASE_DIR, _creds_path)
 # Your Telegram user ID — the bot will send alerts/reports to you directly.
 # Get it by messaging @userinfobot on Telegram, then paste your ID below.
 MY_CHAT_ID       = int(os.environ.get("MY_CHAT_ID", "0"))
